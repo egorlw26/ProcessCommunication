@@ -1,11 +1,13 @@
+#include <sys/mman.h>
 #include <unistd.h>
+// C++
 #include <iostream>
 #include <vector>
 #include <cassert>
 #include <chrono>
 #include <fstream>
 
-const uint64_t PACKET_SIZE = 1024 * 1024 / 2;
+const uint64_t PACKET_SIZE = 1024 * 512;
 
 typedef std::chrono::duration<double, std::ratio<1> > second_;
 
@@ -35,7 +37,7 @@ struct IO {
     void ComputeLatency() {
         uint64_t repeats = 10;
         double total_latency = 0;
-        for(uint64_t k = 0; k < repeats; k++) {
+        for (uint64_t k = 0; k < repeats; k++) {
             Timer timer;
             std::vector <uint8_t> data(128);
             for (uint64_t i = 0; i < data.size(); i++) {
@@ -44,6 +46,7 @@ struct IO {
             write_bytes(data);
             auto response = read_bytes();
             for (uint64_t i = 0; i < data.size(); i++) {
+                //std::cout << (int)data[i] << " " << (int)response[i] << std::endl;
                 assert(data[i] == response[i]);
             }
             total_latency += timer.GetElapsedSeconds() / 2;
@@ -73,7 +76,7 @@ struct IO {
 };
 
 struct FileIO : IO {
-    FileIO(const std::string &filename, int sender):sender(sender) {
+    FileIO(const std::string &filename, int sender) : sender(sender) {
         file.open(filename, std::fstream::in | std::fstream::out);
         int temp = 0;
         file.seekp(0);
@@ -154,19 +157,76 @@ struct FileIO : IO {
     int sender = 0;
 };
 
-void RunBenchmark(IO *io, IO *io_other) {
-    std::cout << "Benchmark started" << std::endl;
+struct MmapIO : IO {
+    MmapIO(uint8_t *ptr, int sender) : data_ptr(ptr + sizeof(int) * 2), sender(sender) {
+        auto int_ptr = reinterpret_cast<int *>(ptr);
+        other_ptr = int_ptr;
+        size_ptr = int_ptr + 1;
+    }
+
+    void close() override {
+        closed = true;
+        *size_ptr = -1;
+    }
+
+    void write_bytes(const std::vector <uint8_t> &bytes) override {
+        if (closed) {
+            return;
+        }
+        //std::cout << "[" << sender << "] Sending message of length: " << bytes.size() << std::endl;
+        while (*size_ptr) {}
+        if (*size_ptr == -1) {
+            close();
+            return;
+        }
+        std::copy(bytes.begin(), bytes.end(), data_ptr);
+        //std::cout << "[" << sender << "] Sent message of length: " << bytes.size() << std::endl;
+        *size_ptr = bytes.size();
+        *other_ptr = sender;
+    }
+
+    std::vector <uint8_t> read_bytes() override {
+        if (closed) {
+            return std::vector<uint8_t>();
+        }
+        int size,other;
+        do {
+            other = *other_ptr;
+            size = *size_ptr;
+        } while(!size || other == sender);
+        if (size == -1) {
+            close();
+            return std::vector<uint8_t>();
+        }
+        std::vector<uint8_t> data(size);
+        //std::cout << "[" << sender << "] Got message of length: " << size << " from " << other << std::endl;
+        std::copy(data_ptr, data_ptr + size, data.data());
+        *size_ptr = 0;
+        *other_ptr = sender;
+        return data;
+    }
+
+    int sender;
+    int *other_ptr;
+    int *size_ptr;
+    uint8_t *data_ptr;
+    bool closed = false;
+};
+
+void RunBenchmark(const std::string & name, IO *io, IO *io_other) {
+    std::cout << "Benchmark for method \""<< name << "\" started" << std::endl;
     int p = fork();
     if (p == 0) {
         // child
         std::vector <uint8_t> data;
         do {
             data = io_other->read_bytes();
-            //std::cout << "Repeater: got data, repeating" << std::endl;
+            //std::cout << "Repeater: got data, repeating " << data.size() << std::endl;
             if (!data.empty()) {
                 io_other->write_bytes(data);
             }
         } while (!data.empty());
+        exit(0);
     } else {
         // parent
         io->ComputeLatency();
@@ -176,9 +236,15 @@ void RunBenchmark(IO *io, IO *io_other) {
 }
 
 int main() {
+    // preparing
     std::ofstream f("file.data");
     f.close();
+    uint8_t *ptr = reinterpret_cast<uint8_t *>(mmap(NULL, (PACKET_SIZE + 8) * sizeof(uint8_t),
+                                                    PROT_READ | PROT_WRITE,
+                                                    MAP_SHARED | MAP_ANONYMOUS,
+                                                    0, 0));
 
-    RunBenchmark(new FileIO("file.data", 0), new FileIO("file.data", 1));
+    RunBenchmark("Files", new FileIO("file.data", 0), new FileIO("file.data", 1));
+    RunBenchmark("Mmap", new MmapIO(ptr, 0), new MmapIO(ptr, 1));
     return 0;
 }
