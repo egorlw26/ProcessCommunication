@@ -1,3 +1,0 @@
-D:/Dev/Cpp/ProcessCommunication/cmake-build-debug/CMakeFiles/ProcessCommunication.dir
-D:/Dev/Cpp/ProcessCommunication/cmake-build-debug/CMakeFiles/edit_cache.dir
-D:/Dev/Cpp/ProcessCommunication/cmake-build-debug/CMakeFiles/rebuild_cache.dir
